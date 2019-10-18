@@ -44,7 +44,7 @@ function Game(prevHtml) {
 
 Game.prototype.handleKeyDown = function (e) {
     if (e.key === 'Escape') {
-        this.die();
+        this.quit();
         return;
     }
 
@@ -57,6 +57,7 @@ Game.prototype.handleKeyDown = function (e) {
         break;
     case " ": // spacebar
         this.input.fire = true;
+        e.preventDefault(); // prevent scrolling
         break;
     }
 }
@@ -75,18 +76,18 @@ Game.prototype.handleKeyUp = function (e) {
     }
 }
 
-Game.prototype.update = function(dt) {
-    this.player.update(this.input, this.enemyFormation.enemies, dt);
-    this.enemyFormation.update(dt);
-    this.starfield.update(dt);
+
+Game.prototype.update = function(dt, ctx) {
+    this.player.update(this.input, this.enemyFormation.enemies, dt, ctx);
+    this.enemyFormation.update(dt, ctx);
+    this.starfield.updateAndDraw(dt, ctx);
 }
 
 Game.prototype.draw = function(ctx) {
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    this.starfield.draw(ctx);
     this.player.draw(ctx);
     this.enemyFormation.draw(ctx);
 }
+
 
 // to be called externally to run game
 Game.prototype.run = function(prevHtml) {
@@ -168,7 +169,7 @@ Game.prototype.gameOver = function () {
     this.running = false;
 }
 
-Game.prototype.die = function() {
+Game.prototype.quit = function() {
     this.running = false;
     // return page to its state before starting game
     //$('main').html(this.prevHtml);
@@ -184,7 +185,11 @@ Game.prototype.loop = function(ctx) {
     var dt = thisFrame - this.prevFrame;
     this.prevFrame = thisFrame;
 
-    this.update(dt);
+    // clear screen must happen here so that particle systems
+    // can update AND draw from calls to player.update and formation.update
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+    this.update(dt, ctx);
     this.draw(ctx);
 }
 
@@ -201,6 +206,8 @@ function Player(x, y) {
     this.shipY = 55;
     this.shipW = 16;
     this.shipH = 16;
+
+    this.particleSystem = null;
 
     this.explosionX = 205;
     this.explosionY = 43;
@@ -229,6 +236,7 @@ function Player(x, y) {
     this.bulletW = 3; 
     this.bulletH = 8; 
 
+
     this.gameOver = null; // game over function to be assigned
 }
 
@@ -239,14 +247,8 @@ Player.prototype.draw = function(ctx) {
             this.shipX, this.shipY, this.shipW, this.shipH,
             this.x, this.y, this.w, this.h
         );
-    } else {
-        ctx.drawImage(this.spritesheet,
-            this.explosionX + (this.frame * this.explosionW), this.explosionY, 
-            this.explosionW, this.explosionH,
-            this.x, this.y, this.w, this.h
-        );
-    }
-
+    } 
+     
     for (var i=0; i<this.bullets.length; i++) {
         ctx.drawImage(this.spritesheet,
             this.bulletX, this.bulletY, this.bulletW, this.bulletH,
@@ -254,13 +256,13 @@ Player.prototype.draw = function(ctx) {
     }
 }
 
-Player.prototype.update = function(input, enemies, dt) {
+Player.prototype.update = function(input, enemies, dt, ctx) {
     switch(this.state) {
     case this.states.NORMAL: 
         this.updateNormal(input, enemies, dt);
         break;
     case this.states.EXPLODE: 
-        this.explode(dt);
+        this.explode(dt, ctx);
         break;
     }
 }
@@ -268,20 +270,20 @@ Player.prototype.update = function(input, enemies, dt) {
 Player.prototype.updateNormal = function(input, enemies, dt) {
     // Move Left
     if (input.left && !input.right) {
-        this.x -= this.speed * dt; 
+        this.x -= this.speed * dt;
         // left wall collision
         if (this.x <= 0) { this.x = 0; }
-    }  
+    }
 
     // Move right
     if (input.right && !input.left) {
-        this.x += this.speed * dt; 
+        this.x += this.speed * dt;
         // right wall collision
-        if (this.x + this.w >= WINDOW_WIDTH) { 
-            this.x = WINDOW_WIDTH - this.w; 
+        if (this.x + this.w >= WINDOW_WIDTH) {
+            this.x = WINDOW_WIDTH - this.w;
         }
-    }  
-    
+    }
+
     // Fire
     if (input.fire && this.canFire && this.bullets.length < 2) {
         this.canFire = false;
@@ -289,15 +291,16 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
             this.canFire = true;
         }.bind(this), this.reloadTime);
 
-        this.bullets.push({ 
-            x: -8 + this.x + this.w/2, 
+        this.bullets.push({
+            x: -8 + this.x + this.w/2,
             y: this.y });
     }
 
+    var i, j, bullet, enemy;
+
     // Bullet update
-    var i, j;
     for (i=0; i<this.bullets.length; i++) {
-        var bullet = this.bullets[i];
+        bullet = this.bullets[i];
 
         bullet.y -= this.bulletSpeed * dt;
         if (bullet.y < 0) {
@@ -306,76 +309,106 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
     }
 
     for (j=0; j<enemies.length; j++) {
-        var enemy = enemies[j];
+        enemy = enemies[j];
 
-        // player collisions
+    // player/enemy collisions
         if (// top left
-            (this.x >= enemy.x && 
-            this.x <= enemy.x + enemy.w && 
-            this.y >= enemy.y && 
+            (this.x >= enemy.x &&
+            this.x <= enemy.x + enemy.w &&
+            this.y >= enemy.y &&
             this.y <= enemy.y + enemy.h) ||
             // top right
-            (this.x + this.w >= enemy.x && 
+            (this.x + this.w >= enemy.x &&
             this.x + this.w <= enemy.x + enemy.w &&
-            this.y >= enemy.y && 
+            this.y >= enemy.y &&
             this.y <= enemy.y + enemy.h) ||
             // bottom left
-            (this.x >= enemy.x && 
+            (this.x >= enemy.x &&
             this.x <= enemy.x + enemy.w &&
-            this.y + this.h >= enemy.y && 
+            this.y + this.h >= enemy.y &&
             this.y + this.h <= enemy.y + enemy.h) ||
             // bottom right
-            (this.x + this.w >= enemy.x && 
+            (this.x + this.w >= enemy.x &&
             this.x + this.w <= enemy.x + enemy.w &&
-            this.y + this.h >= enemy.y && 
+            this.y + this.h >= enemy.y &&
             this.y + this.h <= enemy.y + enemy.h)
         ) {
+            this.particleSystem = new ParticleSystem(this.x+this.w/2, this.y+this.h/2);
             this.state = this.states.EXPLODE;
         }
 
-        // bullet collisions
-        for (i=0; i<this.bullets.length; i++) {
-            var bullet = this.bullets[i];
+    // enemy-bullet/player collisions
+        for (i=0; i<enemy.bullets.length; i++) {
+            bullet = enemy.bullets[i];
             if (// top left
-                (bullet.x >= enemy.x && 
-                bullet.x <= enemy.x + enemy.w && 
-                bullet.y >= enemy.y && 
+                (bullet.x >= this.x &&
+                bullet.x <= this.x + this.w &&
+                bullet.y >= this.y &&
+                bullet.y <= this.y + this.h) ||
+                // top right
+                (bullet.x + bullet.w >= this.x &&
+                bullet.x + bullet.w <= this.x + this.w &&
+                bullet.y >= this.y &&
+                bullet.y <= this.y + this.h) ||
+                // bottom left
+                (bullet.x >= this.x &&
+                bullet.x <= this.x + this.w &&
+                bullet.y + bullet.h >= this.y &&
+                bullet.y + bullet.h <= this.y + this.h) ||
+                // bottom right
+                (bullet.x + bullet.w >= this.x &&
+                bullet.x + bullet.w <= this.x + this.w &&
+                bullet.y + bullet.h >= this.y &&
+                bullet.y + bullet.h <= this.y + this.h)
+            ) {
+                enemy.bullets.splice(i, 1);
+                this.particleSystem = new ParticleSystem(this.x+this.w/2, this.y+this.h/2);
+                this.state = this.states.EXPLODE;
+            }
+
+        }
+
+    // player-bullet/enemy collisions
+        for (i=0; i<this.bullets.length; i++) {
+            bullet = this.bullets[i];
+            if (// top left
+                (bullet.x >= enemy.x &&
+                bullet.x <= enemy.x + enemy.w &&
+                bullet.y >= enemy.y &&
                 bullet.y <= enemy.y + enemy.h) ||
                 // top right
-                (bullet.x + bullet.w >= enemy.x && 
+                (bullet.x + bullet.w >= enemy.x &&
                 bullet.x + bullet.w <= enemy.x + enemy.w &&
-                bullet.y >= enemy.y && 
+                bullet.y >= enemy.y &&
                 bullet.y <= enemy.y + enemy.h) ||
                 // bottom left
-                (bullet.x >= enemy.x && 
+                (bullet.x >= enemy.x &&
                 bullet.x <= enemy.x + enemy.w &&
-                bullet.y + bullet.h >= enemy.y && 
+                bullet.y + bullet.h >= enemy.y &&
                 bullet.y + bullet.h <= enemy.y + enemy.h) ||
                 // bottom right
-                (bullet.x + bullet.w >= enemy.x && 
+                (bullet.x + bullet.w >= enemy.x &&
                 bullet.x + bullet.w <= enemy.x + enemy.w &&
-                bullet.y + bullet.h >= enemy.y && 
+                bullet.y + bullet.h >= enemy.y &&
                 bullet.y + bullet.h <= enemy.y + enemy.h)
             ) {
                 this.bullets.splice(i, 1);
-                //enemies.splice(j, 1);
-                enemies[j].state = enemy.states.EXPLODE;
+                enemy.state = enemy.states.EXPLODE;
             }
         }
     }
-
-
 }
 
-Player.prototype.explode = function(dt) {
-    // Animate
-    this.curFrameTime += dt;
-    if (this.curFrameTime > this.timePerFrame) {
-        this.frame++;
-        this.curFrameTime = 0;
-        if (this.frame >= this.totalFrames)
-            this.gameOver();
+Player.prototype.explode = function(dt, ctx) {
+    // Animate particle system
+    if (this.particleSystem) {
+        this.particleSystem.run(dt, ctx);
+
+        if (this.particleSystem.particles.length == 0) {
+            this.particleSystem = null;
+        }
     }
+
 }
 
 // Enemy
@@ -406,10 +439,16 @@ function Enemy(spritesheet, spriteIndex, x, y, scrambleSpeed = 0.32) {
 
     this.speed = 0.08;
     this.scrambleSpeed = scrambleSpeed;
+
     this.canFire = true;
     this.reloadTime = 4000;
     this.bullets = [];
     this.bulletSpeed = 0.5;
+    this.bulletX = 366;
+    this.bulletY = 195;
+    this.bulletW = 3;
+    this.bulletH = 8;
+
 
     this.states = {
         "NORMAL": 0,
@@ -424,33 +463,35 @@ function Enemy(spritesheet, spriteIndex, x, y, scrambleSpeed = 0.32) {
 }
 
 Enemy.prototype.draw = function(ctx) {
-    if (this.state == this.states.EXPLODE) {
-        ctx.drawImage(this.spritesheet,
-            this.explosionX + (this.frame * this.explosionW), this.explosionY, 
-            this.explosionW, this.explosionH,
-            this.x, this.y, this.w, this.h
-        );
-    } else {
+   if (this.state == this.states.NORMAL) {
         ctx.drawImage(this.spritesheet,
             this.spriteX, this.spriteY + (this.spriteIndex * this.spriteOffY), 
             this.spriteW, this.spriteH,
-            this.x, this.y, this.w, this.h
-        );
+            this.x, this.y, this.w, this.h);
     }
 
-    //for (var i=0; i<this.bullets.length; i++) {
-        //ctx.drawImage(
-            //this.bulletSprite,
-            //this.bullets[i].x,
-            //this.bullets[i].y,
-            //15,
-            //15
-        //);
-    //}
+    for (var i=0; i<this.bullets.length; i++) {
+        ctx.drawImage(this.spritesheet,
+            this.bulletX, this.bulletY, this.bulletW, this.bulletH,
+            this.bullets[i].x, this.bullets[i].y, 8, 24);
+    }
+}
+
+Enemy.prototype.fire = function() {
+    if (this.canFire && this.bullets.length < 2) {
+        setTimeout(function() {
+            this.canFire = true;
+        }.bind(this), this.reloadTime);
+
+        this.bullets.push({ 
+            x: -8 + this.x + this.w/2, 
+            y: this.y + this.h });
+    }
 }
 
 function Formation() {
     this.enemies = [];
+    this.particleSystems = [];
     this.player = null;
     this.spritesheet = null;
     this.direction = 1;
@@ -461,17 +502,19 @@ function Formation() {
     };
     this.state = 2;
     this.movesPerScramble = 3;
+    this.timeScrambleTry = 0;
+    this.timeToMaybeScramble = 5000;
+
 }
 
 Formation.prototype.add = function(enemy) {
     this.enemies.push(enemy);
 }
 
-Formation.prototype.update = function(dt) {
+Formation.prototype.update = function(dt, ctx) {
 
     // Add more enemies if there are very few
     if (this.enemies.length < 3) {
-
         var start = this.enemies.length;
 
         this.add(new Enemy(
@@ -491,10 +534,10 @@ Formation.prototype.update = function(dt) {
             col = i % 5;
             row = Math.floor(i / 5);
             this.enemies[i].formationTarget.x = 100 * col; 
+            this.enemies[i].moveTarget.x = Math.random() * WINDOW_WIDTH; 
             this.enemies[i].formationTarget.y = 100 * row; 
+            this.enemies[i].moveTarget.y = Math.random() * WINDOW_HEIGHT; 
         }
-
-
     }
 
     switch(this.state) {
@@ -509,19 +552,45 @@ Formation.prototype.update = function(dt) {
         break;
     }
 
-    for (var i=0; i<this.enemies.length; i++) {
+    
+    // enemy updates regardless of state
+    var i, j;
+    for (i=0; i<this.enemies.length; i++) {
         var enemy = this.enemies[i];
         if (enemy.state == enemy.states.EXPLODE) {
-            enemy.curFrameTime += dt;
-            if (enemy.curFrameTime > enemy.timePerFrame) {
-                enemy.frame++;
-                enemy.curFrameTime = 0;
-                if (enemy.frame >= enemy.totalFrames)
-                    this.enemies.splice(i, 1);
+            // spawn a particle system and remove the enemy from the list
+            this.particleSystems.push(
+                new ParticleSystem(enemy.x + enemy.w/2, enemy.y + enemy.h/2));
+            this.enemies.splice(i, 1);
+        }
+
+        // random chance at firing bullet
+        if (Math.random() < 0.008) {
+            enemy.fire();
+        }
+
+        // bullets update
+        for (j=0; j<enemy.bullets.length; j++) {
+            var bullet = enemy.bullets[j];
+
+            bullet.y += enemy.bulletSpeed * dt;
+            if (bullet.y > WINDOW_HEIGHT) {
+                enemy.bullets.splice(i, 1);
             }
-                   
         }
     }
+
+    // update & draw all enemy particle systems
+    for (var i = this.particleSystems.length - 1; i >= 0; i--) {
+        var system = this.particleSystems[i];
+
+        system.run(dt, ctx);
+
+        if (system.particles.length == 0) {
+            this.particleSystems.splice(i, 1);
+        }
+    }
+
 }
 
 Formation.prototype.lateral = function(dt) {
@@ -543,6 +612,14 @@ Formation.prototype.lateral = function(dt) {
             this.direction *= -1;
             this.state = this.states.ADVANCE;
         }
+    }
+
+    // 50% chance of scrambling every timeToMaybeScramble milliseconds
+    this.timeScrambleTry += dt;
+    if (this.timeScrambleTry > this.timeToMaybeScramble) {
+        if (Math.random() < 0.5)
+            this.state = this.states.SCRAMBLE;
+        this.timeScrambleTry = 0;
     }
 }
 
@@ -625,7 +702,7 @@ Formation.prototype.draw = function(ctx) {
 // ---------------------------------------------------------------------------
 function Starfield() {
     this.moving = true;
-    this.stars = [];    
+    this.stars = [];
     this.maxStars = 200;
     this.colors = [
         '#861111',
@@ -639,23 +716,21 @@ function Starfield() {
     this.speed = 0.2;
 }
 
-Starfield.prototype.update = function(dt) {
+Starfield.prototype.updateAndDraw = function(dt, ctx) {
 
     if (!this.moving) return;
 
     for (i=0; i<this.stars.length; i++) {
         var star = this.stars[i];
+
+        // update position
         star.y += this.speed * star.r * dt;
         if (star.y > WINDOW_HEIGHT) {
             star.y = randInt(-20, -10);
             star.x = randInt(0, WINDOW_WIDTH);
         }
-    }
-}
 
-Starfield.prototype.draw = function(ctx) {
-    for (i=0; i<this.stars.length; i++) {
-        var star = this.stars[i];
+        // draw
         ctx.beginPath();
         ctx.arc(star.x, star.y, star.r, 0, 2*Math.PI);
         ctx.fillStyle = star.color;
@@ -684,6 +759,56 @@ function Star(x, y, r, color) {
     this.curTime;
 }
 
+// Particle System, Explosion
+// ---------------------------------------------------------------------------
+function ParticleSystem(x, y) {
+    this.origin = { x: x, y: y };
+    this.particles = [];
+    this.maxParticles = 100;
+    this.maxLife = 2000;
+    this.lifetime = 0;
+}
+
+ParticleSystem.prototype.run = function(dt, ctx) {
+
+    if (this.particles.length < this.maxParticles && this.lifetime < this.maxLife) {
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+    }
+
+    var i;
+    for (i = this.particles.length-1; i >= 0; i--) {
+        var p = this.particles[i];
+        // update vel
+        p.vel.x += p.acc.x;
+        p.vel.y += p.acc.y;
+        // update pos
+        p.pos.x += p.vel.x;
+        p.pos.y += p.vel.y;
+        // update lifespan
+        p.lifespan -= 3;
+
+        if (p.lifespan < 0) {
+            this.particles.splice(i, 1);
+        } else {
+            ctx.fillStyle = 'rgba('+p.color.r+','+p.color.g+
+                ','+p.color.b+','+p.lifespan/255+')';
+            ctx.fillRect(p.pos.x, p.pos.y, p.w, p.h);
+        }
+    }
+
+    this.lifetime += dt;
+}
+
+function Particle(x, y) {
+    this.acc = { x: 0, y: 0 };
+    this.vel = { x: Math.random()*2 - 1, y: Math.random()*2 - 1 };
+    this.pos = { x: x, y: y };
+    this.lifespan = 255;
+    this.color = { r: 255, g: Math.floor(Math.random() * 238), b: 0 };
+    var size = Math.random()*3;
+    this.w = size;
+    this.h = size;
+}
 
 ////////
 var invaders = new Game("<div>GAME OVER</div>");
