@@ -1,9 +1,14 @@
 // usage: 
 // var invaders = new Game(oldHtml);
 // invaders.run();
+// ---- replaces oldHtml with the game, and restores oldHtml to the DOM on 
+// ---- exit (escape key)
 
 var WINDOW_HEIGHT = 800;
 var WINDOW_WIDTH = WINDOW_HEIGHT * 3 / 4;
+var canvas = document.getElementById('canvas');
+canvas.width = WINDOW_WIDTH;
+canvas.height = WINDOW_HEIGHT; 
 
 function randInt(min, max) {
   min = Math.ceil(min);
@@ -40,6 +45,8 @@ function Game(prevHtml) {
     this.enemyFormation = null;
     this.starfield = null;
     this.prevFrame = 0;
+
+    this.music = null;
 }
 
 Game.prototype.handleKeyDown = function (e) {
@@ -76,29 +83,42 @@ Game.prototype.handleKeyUp = function (e) {
     }
 }
 
-
 Game.prototype.update = function(dt, ctx) {
     this.player.update(this.input, this.enemyFormation.enemies, dt, ctx);
     this.enemyFormation.update(dt, ctx);
     this.starfield.updateAndDraw(dt, ctx);
 }
+// functions called from within update may draw to ctx, 
+// screen clear is called before update and draw
 
 Game.prototype.draw = function(ctx) {
     this.player.draw(ctx);
     this.enemyFormation.draw(ctx);
 }
 
+Game.prototype.loop = function(ctx) {
+    if (this.running) {
+        window.requestAnimationFrame(this.loop.bind(this, ctx));
+    }
 
-// to be called externally to run game
+    var thisFrame = Date.now();
+    var dt = thisFrame - this.prevFrame;
+    this.prevFrame = thisFrame;
+
+    // clear here so that functions in update() may also draw 
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+    this.update(dt, ctx);
+    this.draw(ctx);
+}
+
+// external API to run game 
 Game.prototype.run = function(prevHtml) {
     //WINDOW_HEIGHT = $(window).height() - 200; 
     WINDOW_HEIGHT = window.innerHeight - 15; 
 
     WINDOW_WIDTH = WINDOW_HEIGHT * 3 / 4;
 
-    var canvas = document.getElementById('canvas');
-    canvas.width = WINDOW_WIDTH;
-    canvas.height = WINDOW_HEIGHT; 
     var ctx = canvas.getContext('2d');
 
     document.addEventListener('keydown', this.handleKeyDown.bind(this));
@@ -151,17 +171,12 @@ Game.prototype.loadAndRun = function(spritePaths, callback) {
             enemies[i].formationTarget.y = 100 * row; 
         }
 
-        //this.enemyFormation.add(new Enemy(spritesheet, randInt(0, 4), 100, 900)),
-        //this.enemyFormation.add(new Enemy(spritesheet, randInt(0, 4), 200, 900)),
-        //this.enemyFormation.add(new Enemy(spritesheet, randInt(0, 4), 300, 1020)),
-        //this.enemyFormation.add(new Enemy(spritesheet, randInt(0, 4), 400, 900)),
-        //this.enemyFormation.add(new Enemy(spritesheet, randInt(0, 4), 500, 900))
-
         if (++totalLoaded >= Object.keys(spritePaths).length) {
             callback();
         }
     }.bind(this);
 
+    this.music = document.getElementById("mightyDub");
 }
 
 Game.prototype.gameOver = function () {
@@ -176,23 +191,6 @@ Game.prototype.quit = function() {
     //$('main').css('text-align', '');
 }
 
-Game.prototype.loop = function(ctx) {
-    if (this.running) {
-        window.requestAnimationFrame(this.loop.bind(this, ctx));
-    }
-
-    var thisFrame = Date.now();
-    var dt = thisFrame - this.prevFrame;
-    this.prevFrame = thisFrame;
-
-    // clear screen must happen here so that particle systems
-    // can update AND draw from calls to player.update and formation.update
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-    this.update(dt, ctx);
-    this.draw(ctx);
-}
-
 // Player
 // ---------------------------------------------------------------------------
 function Player(x, y) {
@@ -200,24 +198,39 @@ function Player(x, y) {
     this.y = y;
     this.w = 50;
     this.h = 50;
-    this.spritesheet = null;
 
+    this.spritesheet = null;
+    this.enemies = null;
+    this.particleSystem = null;
+
+    this.speed = 0.3;
+    this.canFire = true;
+    this.reloadTime = 250;
+    this.bullets = [];
+    this.bulletSpeed = 0.5;
+
+    this.lives = 100;
+
+    // spritesheet locations
     this.shipX = 184;
     this.shipY = 55;
     this.shipW = 16;
     this.shipH = 16;
-
-    this.particleSystem = null;
-
     this.explosionX = 205;
     this.explosionY = 43;
     this.explosionW = 40;
     this.explosionH = 40;
+    this.bulletX = 366; 
+    this.bulletY = 195; 
+    this.bulletW = 3; 
+    this.bulletH = 8; 
 
     this.frame = 0;
     this.totalFrames = 4;
     this.curFrameTime = 0;
     this.timePerFrame = 300; // milliseconds
+
+    this.firstCall = true;
 
     this.states = {
         "NORMAL":  0,
@@ -225,18 +238,9 @@ function Player(x, y) {
     };
     this.state = 0;
 
-    this.enemies = null;
-    this.speed = 0.3;
-    this.canFire = true;
-    this.reloadTime = 250;
-    this.bullets = [];
-    this.bulletSpeed = 0.5;
-    this.bulletX = 366; 
-    this.bulletY = 195; 
-    this.bulletW = 3; 
-    this.bulletH = 8; 
-
-
+    this.deadTime = 0;
+    this.respawnTime = 3000;
+    
     this.gameOver = null; // game over function to be assigned
 }
 
@@ -264,6 +268,17 @@ Player.prototype.update = function(input, enemies, dt, ctx) {
     case this.states.EXPLODE: 
         this.explode(dt, ctx);
         break;
+    }
+
+    // Bullet update
+    var i, bullet;
+    for (i=0; i<this.bullets.length; i++) {
+        bullet = this.bullets[i];
+
+        bullet.y -= this.bulletSpeed * dt;
+        if (bullet.y < 0) {
+            this.bullets.splice(i, 1);
+        }
     }
 }
 
@@ -297,16 +312,6 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
     }
 
     var i, j, bullet, enemy;
-
-    // Bullet update
-    for (i=0; i<this.bullets.length; i++) {
-        bullet = this.bullets[i];
-
-        bullet.y -= this.bulletSpeed * dt;
-        if (bullet.y < 0) {
-            this.bullets.splice(i, 1);
-        }
-    }
 
     for (j=0; j<enemies.length; j++) {
         enemy = enemies[j];
@@ -400,6 +405,14 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
 }
 
 Player.prototype.explode = function(dt, ctx) {
+
+    if (this.firstCall) {
+        this.lives--;
+        this.firstCall = false;
+    }
+        
+    this.deadTime += dt;
+
     // Animate particle system
     if (this.particleSystem) {
         this.particleSystem.run(dt, ctx);
@@ -409,6 +422,11 @@ Player.prototype.explode = function(dt, ctx) {
         }
     }
 
+    if (this.lives > 0 && this.deadTime > this.respawnTime) {
+        this.deadTime = 0;
+        this.firstCall = true;
+        this.state = this.states.NORMAL;
+    }
 }
 
 // Enemy
@@ -551,7 +569,6 @@ Formation.prototype.update = function(dt, ctx) {
         this.scramble(dt);
         break;
     }
-
     
     // enemy updates regardless of state
     var i, j;
@@ -632,8 +649,8 @@ Formation.prototype.advance = function(dt) {
     this.state = this.states.LATERAL;
 }
 
-// TODO(shaw): figure this shit out
 Formation.prototype.scramble = function(dt) {
+
     if (!this.scrambled) {
         for (var i=0; i<this.enemies.length; i++) {
             var enemy = this.enemies[i];
@@ -713,7 +730,7 @@ function Starfield() {
         '#46ABB7',
         '#B75C46',
     ];
-    this.speed = 0.2;
+    this.speed = 0.15;
 }
 
 Starfield.prototype.updateAndDraw = function(dt, ctx) {
@@ -764,14 +781,23 @@ function Star(x, y, r, color) {
 function ParticleSystem(x, y) {
     this.origin = { x: x, y: y };
     this.particles = [];
-    this.maxParticles = 100;
-    this.maxLife = 2000;
+    this.maxParticles = 500;
+    this.maxLife = 1000;
     this.lifetime = 0;
 }
 
 ParticleSystem.prototype.run = function(dt, ctx) {
 
     if (this.particles.length < this.maxParticles && this.lifetime < this.maxLife) {
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
+        this.particles.push(new Particle(this.origin.x, this.origin.y));
         this.particles.push(new Particle(this.origin.x, this.origin.y));
     }
 
@@ -801,7 +827,7 @@ ParticleSystem.prototype.run = function(dt, ctx) {
 
 function Particle(x, y) {
     this.acc = { x: 0, y: 0 };
-    this.vel = { x: Math.random()*2 - 1, y: Math.random()*2 - 1 };
+    this.vel = { x: 1.1*(Math.random()*2 - 1), y: 1.1*(Math.random()*2 - 1) };
     this.pos = { x: x, y: y };
     this.lifespan = 255;
     this.color = { r: 255, g: Math.floor(Math.random() * 238), b: 0 };
@@ -811,7 +837,14 @@ function Particle(x, y) {
 }
 
 ////////
-var invaders = new Game("<div>GAME OVER</div>");
-invaders.run();
+var startButton = document.getElementById("start");
+var invaders = new Game();
+
+startButton.addEventListener("click", function(e) {
+    invaders.run();
+    invaders.music.play();
+    document.getElementById("canvas").style.display = "block";
+    startButton.style.display = "none";
+});
 
 
