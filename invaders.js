@@ -1,14 +1,12 @@
-// usage: 
+// usage:
 // var invaders = new Game(oldHtml);
 // invaders.run();
-// ---- replaces oldHtml with the game, and restores oldHtml to the DOM on 
-// ---- exit (escape key)
 
+var DEBUG = false;
 var WINDOW_HEIGHT = 800;
 var WINDOW_WIDTH = WINDOW_HEIGHT * 3 / 4;
-var canvas = document.getElementById('canvas');
-canvas.width = WINDOW_WIDTH;
-canvas.height = WINDOW_HEIGHT; 
+
+var flyInPath = [];
 
 function randInt(min, max) {
   min = Math.ceil(min);
@@ -27,6 +25,32 @@ function distance(a, b) {
     return Math.sqrt(x*x + y*y)
 }
 
+function subVector(a, b) {
+    return {
+        x: a.x - b.x,
+        y: a.y - b.y
+    }
+}
+
+function multVector(a, scalar) {
+    return {
+        x: a.x * scalar,
+        y: a.y * scalar
+    }
+}
+
+function normVector(a) {
+    var mag = magVector(a);
+    return {
+        x: a.x / mag,
+        y: a.y / mag
+    }
+}
+
+function magVector(a) {
+    return Math.sqrt(a.x*a.x + a.y*a.y);
+}
+
 function Game(prevHtml) {
     this.prevHtml = prevHtml;    
     this.running = true;
@@ -36,17 +60,65 @@ function Game(prevHtml) {
         'fire' : false
     };
     this.spritePaths = {
-        'spritesheet': 'spritesheet.png',
+        'spritesheet': 'index.php?img=images/spritesheet.png',
     };
     this.sprites = {
         'spritesheet': null,
     };
     this.player = null;
+   
     this.enemyFormation = null;
+    this.enemies = [];
+    this.timeSinceRespawn = 0;
+    this.respawnTime = 6000;
+    this.maxEnemies = 30;
+
     this.starfield = null;
     this.prevFrame = 0;
+}
 
-    this.music = null;
+// external API to run game
+Game.prototype.run = function(prevHtml) {
+    WINDOW_HEIGHT = $(window).height() - 200;
+    WINDOW_WIDTH = WINDOW_HEIGHT * 3 / 4;
+
+    var canvas = document.getElementById('canvas');
+    canvas.width = WINDOW_WIDTH;
+    canvas.height = WINDOW_HEIGHT;
+    var ctx = canvas.getContext('2d');
+
+    var midX = WINDOW_WIDTH/2;
+
+    // generate sampled path for fly in
+    var flyInBezier = new BezierPath();
+
+    flyInBezier.addCurve(new BezierCurve(
+        { x: 0.5, y: -0.01 },
+        { x: 0.5, y: -0.02 },
+        { x: 0.5, y: 0.03  },
+        { x: 0.5, y: 0.02  }),
+        1);
+    flyInBezier.addCurve(new BezierCurve(
+        { x: 0.5,   y: 0.02  },
+        { x: 0.5,   y: 0.1   },
+        { x: 0.086, y: 0.28 },
+        { x: 0.086, y: 0.366 }),
+        25);
+    flyInBezier.addCurve(new BezierCurve(
+        { x: 0.086, y: 0.366 },
+        { x: 0.086, y: 0.56 },
+        { x: 0.374, y: 0.56 },
+        { x: 0.374, y: 0.366 }),
+        25);
+
+    flyInBezier.sample(flyInPath);
+
+    document.addEventListener('keydown', this.handleKeyDown.bind(this));
+    document.addEventListener('keyup', this.handleKeyUp.bind(this));
+
+    this.prevFrame = Date.now();    
+   
+    this.loadAndRun(this.spritePaths, this.loop.bind(this, ctx));
 }
 
 Game.prototype.handleKeyDown = function (e) {
@@ -64,7 +136,6 @@ Game.prototype.handleKeyDown = function (e) {
         break;
     case " ": // spacebar
         this.input.fire = true;
-        e.preventDefault(); // prevent scrolling
         break;
     }
 }
@@ -85,15 +156,115 @@ Game.prototype.handleKeyUp = function (e) {
 
 Game.prototype.update = function(dt, ctx) {
     this.player.update(this.input, this.enemyFormation.enemies, dt, ctx);
-    this.enemyFormation.update(dt, ctx);
-    this.starfield.updateAndDraw(dt, ctx);
+    this.enemyFormation.update(dt);
+    //this.starfield.updateAndDraw(dt, ctx);
+
+    // spawn more enemies
+    this.timeSinceRespawn += dt;
+    if (this.enemies.length < 3 ||
+        (this.timeSinceRespawn > this.respawnTime &&
+        this.enemies.length < this.maxEnemies))
+    {
+        this.timeSinceRespawn = 0;
+        this.spawnEnemies(5);
+    }
+
+
+
+    var i;
+    for (i=0; i < this.enemies.length; i++) {
+        this.enemies[i].update(dt, ctx);
+    }
+   
 }
-// functions called from within update may draw to ctx, 
-// screen clear is called before update and draw
 
 Game.prototype.draw = function(ctx) {
-    this.player.draw(ctx);
-    this.enemyFormation.draw(ctx);
+    //this.player.draw(ctx);
+    //this.enemyFormation.draw(ctx);
+    var i;
+    for (i=0; i < this.enemies.length; i++) {
+        this.enemies[i].draw(ctx);
+    }
+}
+
+Game.prototype.loadAndRun = function(spritePaths, callback) {
+    var totalLoaded = 0;
+
+    this.starfield = new Starfield();
+    this.starfield.fill();
+
+    // create player
+    this.player = new Player(canvas.width/2, canvas.height - 100);
+    this.player.gameOver = this.gameOver;
+
+    // create formation
+    this.enemyFormation = new Formation();
+    this.enemyFormation.player = this.player;
+
+    var spritesheet = new Image();
+    spritesheet.src = spritePaths.spritesheet;
+
+    spritesheet.onload = function () {
+        this.sprites.spritesheet = spritesheet;
+        this.player.spritesheet = spritesheet;
+        this.enemyFormation.spritesheet = spritesheet;
+
+        // create enemies
+        this.initEnemies(spritesheet);
+
+        if (++totalLoaded >= Object.keys(spritePaths).length) {
+            callback();
+        }
+
+    }.bind(this);
+
+}
+
+Game.prototype.initEnemies = function (spritesheet) {
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), -140, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), -80, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), -20, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 40, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 100, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 160, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 220, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 280, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 340, -50, Math.random()*0.2 + 0.2));
+    this.enemies.push(new Enemy(
+        spritesheet, randInt(0, 4), 400, -50, Math.random()*0.2 + 0.2));
+
+    this.enemyFormation.enemies = this.enemies;
+
+    var i, col, row;
+    for (i=0; i<this.enemies.length; i++) {
+        col = i % 5;
+        row = Math.floor(i / 5);
+        this.enemies[i].formation = this.enemyFormation;
+        this.enemies[i].formationTarget.x = 100 * col + 25;
+        this.enemies[i].formationTarget.y = 100 * row + 25;
+        this.enemies[i].moveTarget.x = randInt(0, WINDOW_WIDTH);
+        this.enemies[i].moveTarget.y = randInt(0, WINDOW_HEIGHT);
+    }
+}
+
+Game.prototype.gameOver = function () {
+    console.log("GAME OVER!");
+}
+
+Game.prototype.quit = function() {
+    this.running = false;
+    // return page to its state before starting game
+    $('main').html(this.prevHtml);
+    $('main').css('text-align', '');
 }
 
 Game.prototype.loop = function(ctx) {
@@ -105,90 +276,12 @@ Game.prototype.loop = function(ctx) {
     var dt = thisFrame - this.prevFrame;
     this.prevFrame = thisFrame;
 
-    // clear here so that functions in update() may also draw 
+    // clear screen must happen here so that particle systems
+    // can update AND draw from calls to player.update and formation.update
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
     this.update(dt, ctx);
     this.draw(ctx);
-}
-
-// external API to run game 
-Game.prototype.run = function(prevHtml) {
-    //WINDOW_HEIGHT = $(window).height() - 200; 
-    WINDOW_HEIGHT = window.innerHeight - 15; 
-
-    WINDOW_WIDTH = WINDOW_HEIGHT * 3 / 4;
-
-    var ctx = canvas.getContext('2d');
-
-    document.addEventListener('keydown', this.handleKeyDown.bind(this));
-    document.addEventListener('keyup', this.handleKeyUp.bind(this));
-
-    this.prevFrame = Date.now();    
-    
-    this.loadAndRun(this.spritePaths, this.loop.bind(this, ctx));
-}
-
-Game.prototype.loadAndRun = function(spritePaths, callback) {
-    var totalLoaded = 0;
-
-    this.starfield = new Starfield();
-    this.starfield.fill();
-
-    // create player 
-    this.player = new Player(canvas.width/2, canvas.height - 100); 
-    this.player.gameOver = this.gameOver;
-
-    // create enemies
-    this.enemyFormation = new Formation();
-    this.enemyFormation.player = this.player;
-
-    var spritesheet = new Image();
-    spritesheet.src = spritePaths.spritesheet; 
-
-    spritesheet.onload = function () {
-        this.sprites.spritesheet = spritesheet;
-        this.player.spritesheet = spritesheet;
-        this.enemyFormation.spritesheet = spritesheet;
-
-        this.enemyFormation.add(new Enemy(
-            spritesheet, randInt(0, 4), 100, 50, Math.random()*0.2 + 0.2));
-        this.enemyFormation.add(new Enemy(
-            spritesheet, randInt(0, 4), 200, 50, Math.random()*0.2 + 0.2));
-        this.enemyFormation.add(new Enemy(
-            spritesheet, randInt(0, 4), 300, 50, Math.random()*0.2 + 0.2));
-        this.enemyFormation.add(new Enemy(
-            spritesheet, randInt(0, 4), 400, 50, Math.random()*0.2 + 0.2));
-        this.enemyFormation.add(new Enemy(
-            spritesheet, randInt(0, 4), 500, 50, Math.random()*0.2 + 0.2));
-
-        var enemies = this.enemyFormation.enemies;
-        var i, col, row;
-        for (i=0; i<enemies.length; i++) {
-            col = i % 5;
-            row = Math.floor(i / 5);
-            enemies[i].formationTarget.x = 100 * col; 
-            enemies[i].formationTarget.y = 100 * row; 
-        }
-
-        if (++totalLoaded >= Object.keys(spritePaths).length) {
-            callback();
-        }
-    }.bind(this);
-
-    this.music = document.getElementById("mightyDub");
-}
-
-Game.prototype.gameOver = function () {
-    console.log("GAME OVER!");
-    this.running = false;
-}
-
-Game.prototype.quit = function() {
-    this.running = false;
-    // return page to its state before starting game
-    //$('main').html(this.prevHtml);
-    //$('main').css('text-align', '');
 }
 
 // Player
@@ -198,39 +291,22 @@ function Player(x, y) {
     this.y = y;
     this.w = 50;
     this.h = 50;
-
     this.spritesheet = null;
-    this.enemies = null;
-    this.particleSystem = null;
 
-    this.speed = 0.3;
-    this.canFire = true;
-    this.reloadTime = 250;
-    this.bullets = [];
-    this.bulletSpeed = 0.5;
-
-    this.lives = 100;
-
-    // spritesheet locations
     this.shipX = 184;
     this.shipY = 55;
     this.shipW = 16;
     this.shipH = 16;
+
     this.explosionX = 205;
     this.explosionY = 43;
     this.explosionW = 40;
     this.explosionH = 40;
-    this.bulletX = 366; 
-    this.bulletY = 195; 
-    this.bulletW = 3; 
-    this.bulletH = 8; 
 
     this.frame = 0;
     this.totalFrames = 4;
     this.curFrameTime = 0;
     this.timePerFrame = 300; // milliseconds
-
-    this.firstCall = true;
 
     this.states = {
         "NORMAL":  0,
@@ -238,9 +314,18 @@ function Player(x, y) {
     };
     this.state = 0;
 
-    this.deadTime = 0;
-    this.respawnTime = 3000;
-    
+    this.enemies = null;
+    this.speed = 0.3;
+    this.canFire = true;
+    this.reloadTime = 250;
+    this.bullets = [];
+    this.bulletSpeed = 0.5;
+    this.bulletX = 366;
+    this.bulletY = 195;
+    this.bulletW = 3;
+    this.bulletH = 8;
+
+    this.particleSystem = null;
     this.gameOver = null; // game over function to be assigned
 }
 
@@ -251,44 +336,40 @@ Player.prototype.draw = function(ctx) {
             this.shipX, this.shipY, this.shipW, this.shipH,
             this.x, this.y, this.w, this.h
         );
-    } 
-     
+    } else {
+        ctx.drawImage(this.spritesheet,
+            this.explosionX + (this.frame * this.explosionW), this.explosionY,
+            this.explosionW, this.explosionH,
+            this.x, this.y, this.w, this.h
+        );
+    }
+
     for (var i=0; i<this.bullets.length; i++) {
         ctx.drawImage(this.spritesheet,
             this.bulletX, this.bulletY, this.bulletW, this.bulletH,
             this.bullets[i].x, this.bullets[i].y, 8, 24);
     }
+
 }
 
 Player.prototype.update = function(input, enemies, dt, ctx) {
     switch(this.state) {
-    case this.states.NORMAL: 
+    case this.states.NORMAL:
         this.updateNormal(input, enemies, dt);
         break;
-    case this.states.EXPLODE: 
+    case this.states.EXPLODE:
         this.explode(dt, ctx);
         break;
     }
-
-    // Bullet update
-    var i, bullet;
-    for (i=0; i<this.bullets.length; i++) {
-        bullet = this.bullets[i];
-
-        bullet.y -= this.bulletSpeed * dt;
-        if (bullet.y < 0) {
-            this.bullets.splice(i, 1);
-        }
-    }
 }
 
-Player.prototype.updateNormal = function(input, enemies, dt) {
+Player.prototype.updateNormal = function(input, enemies, dt, ctx) {
     // Move Left
     if (input.left && !input.right) {
         this.x -= this.speed * dt;
         // left wall collision
         if (this.x <= 0) { this.x = 0; }
-    }
+    }  
 
     // Move right
     if (input.right && !input.left) {
@@ -297,8 +378,8 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
         if (this.x + this.w >= WINDOW_WIDTH) {
             this.x = WINDOW_WIDTH - this.w;
         }
-    }
-
+    }  
+   
     // Fire
     if (input.fire && this.canFire && this.bullets.length < 2) {
         this.canFire = false;
@@ -308,10 +389,22 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
 
         this.bullets.push({
             x: -8 + this.x + this.w/2,
-            y: this.y });
+            y: this.y,
+            r: 5
+        });
     }
 
     var i, j, bullet, enemy;
+
+    // Bullet update
+    for (i=0; i<this.bullets.length; i++) {
+        bullet = this.bullets[i];
+
+        bullet.y -= this.bulletSpeed * dt;
+        if (bullet.y < 0) {
+            this.bullets.splice(i, 1);
+        }
+    }
 
     for (j=0; j<enemies.length; j++) {
         enemy = enemies[j];
@@ -398,22 +491,19 @@ Player.prototype.updateNormal = function(input, enemies, dt) {
                 bullet.y + bullet.h <= enemy.y + enemy.h)
             ) {
                 this.bullets.splice(i, 1);
+
+                enemy.particleSystem = new ParticleSystem(enemy.x+enemy.w/2,
+                                                          enemy.y+enemy.h/2);
                 enemy.state = enemy.states.EXPLODE;
             }
         }
     }
+
+
 }
 
 Player.prototype.explode = function(dt, ctx) {
-
-    if (this.firstCall) {
-        this.lives--;
-        this.firstCall = false;
-    }
-        
-    this.deadTime += dt;
-
-    // Animate particle system
+    // Animate
     if (this.particleSystem) {
         this.particleSystem.run(dt, ctx);
 
@@ -421,77 +511,105 @@ Player.prototype.explode = function(dt, ctx) {
             this.particleSystem = null;
         }
     }
-
-    if (this.lives > 0 && this.deadTime > this.respawnTime) {
-        this.deadTime = 0;
-        this.firstCall = true;
-        this.state = this.states.NORMAL;
-    }
 }
 
 // Enemy
 // ---------------------------------------------------------------------------
 function Enemy(spritesheet, spriteIndex, x, y, scrambleSpeed = 0.32) {
     this.spritesheet = spritesheet;
+
     this.x = x;
     this.y = y;
     this.w = 50;
     this.h = 50;
 
     this.spriteIndex = spriteIndex % 4; // which enemy sprite to use
-    this.spriteOffY = 24; // these sprites need a 24px vertical offset between 
+    this.spriteOffY = 24; // these sprites need a 24px vertical offset between
     this.spriteX = 184;
     this.spriteY = 103; // 103, 127, 151, 175
     this.spriteW = 16;
     this.spriteH = 16;
 
-    this.explosionX = 196;
-    this.explosionY = 186;
-    this.explosionW = 40;
-    this.explosionH = 40;
+    this.particleSystem = null;
 
     this.frame = 0;
     this.totalFrames = 4;
     this.curFrameTime = 0;
     this.timePerFrame = 200; // milliseconds
 
-    this.speed = 0.08;
+    this.speed = 0.16;
+    this.diveSpeed = 0.419;
     this.scrambleSpeed = scrambleSpeed;
+    this.movesPerScramble = 3;
 
     this.canFire = true;
     this.reloadTime = 4000;
     this.bullets = [];
     this.bulletSpeed = 0.5;
-    this.bulletX = 366;
-    this.bulletY = 195;
-    this.bulletW = 3;
-    this.bulletH = 8;
-
-
+ 
     this.states = {
-        "NORMAL": 0,
-        "EXPLODE": 1
+        "FLY_IN":         0,
+        "LATERAL":        1,
+        "SCRAMBLE":       2,
+        "DIVE":           3,
+        "JOIN_FORMATION": 4,
+        "EXPLODE":        5,
     };
-    this.state = 0; 
+    this.state = 0;
 
+    this.formation = null;
     this.numMoves = 0;
     this.moveTarget = { x: 0, y: 0 };
     this.formationTarget = { x: 0, y: 0 };
     this.inFormation = false;
+
+    this.diveTime = 0;
+    this.maxDive = 4000;
+
+    this.paths = [];
+    this.currentPath = 0;
+    this.currentWaypoint = 0;
 }
 
 Enemy.prototype.draw = function(ctx) {
-   if (this.state == this.states.NORMAL) {
-        ctx.drawImage(this.spritesheet,
-            this.spriteX, this.spriteY + (this.spriteIndex * this.spriteOffY), 
-            this.spriteW, this.spriteH,
-            this.x, this.y, this.w, this.h);
+   // draw enemy
+   if (this.state != this.states.EXPLODE) {
+        //ctx.drawImage(this.spritesheet,
+            //this.spriteX, this.spriteY + (this.spriteIndex * this.spriteOffY),
+            //this.spriteW, this.spriteH,
+            //this.x, this.y, this.w, this.h);
+        ctx.beginPath();
+        ctx.rect(this.x, this.y, 2, 2);
+        ctx.stroke();
     }
 
+    // draw bullets
     for (var i=0; i<this.bullets.length; i++) {
-        ctx.drawImage(this.spritesheet,
-            this.bulletX, this.bulletY, this.bulletW, this.bulletH,
-            this.bullets[i].x, this.bullets[i].y, 8, 24);
+        //ctx.beginPath();
+        //ctx.arc(this.bullets[i].x, this.bullets[i].y, this.bullets[i].r, 0, 2*Math.PI);
+        //ctx.fillStyle = '#55FF5C';
+        //ctx.fill();
+
+        //ctx.beginPath();
+        //ctx.rect(this.bullets[i].x, this.bullets[i].y, 2, 2);
+        //ctx.stroke();
+    }
+
+    if(DEBUG) {
+    // draw current path
+        //var path = this.paths[this.currentPath];
+        var path = this.state == this.states.FLY_IN
+            ? flyInPath
+            : this.paths[this.currentPath];
+
+        if (path) {
+            ctx.moveTo(this.x, this.y);
+            ctx.beginPath();
+            for (var i=0; i < path.length-1; i++) {
+                ctx.lineTo(path[i].x, path[i].y);
+            }
+            ctx.stroke();
+        }
     }
 }
 
@@ -501,225 +619,257 @@ Enemy.prototype.fire = function() {
             this.canFire = true;
         }.bind(this), this.reloadTime);
 
-        this.bullets.push({ 
-            x: -8 + this.x + this.w/2, 
-            y: this.y + this.h });
+        this.bullets.push({
+            x: -8 + this.x + this.w/2,
+            y: this.y + this.h,
+            r: 5
+        });
     }
 }
 
-function Formation() {
-    this.enemies = [];
-    this.particleSystems = [];
-    this.player = null;
-    this.spritesheet = null;
-    this.direction = 1;
-    this.states = {
-        "LATERAL":  0,
-        "ADVANCE":  1,
-        "SCRAMBLE": 2
-    };
-    this.state = 2;
-    this.movesPerScramble = 3;
-    this.timeScrambleTry = 0;
-    this.timeToMaybeScramble = 5000;
+Enemy.prototype.createDivePath = function() {
+    var bezierPath = new BezierPath();
 
+    bezierPath.addCurve(new BezierCurve(
+        { x: 0,   y: 0   },
+        { x: 0,   y: -45 },
+        { x: -60, y: -45 },
+        { x: -60, y: 0   }),
+        15);
+
+    bezierPath.addCurve(new BezierCurve(
+        { x: -60, y: 0   },
+        { x: -60, y: 80  },
+        { x: 0,   y: 150 },
+        { x: 100, y: 150 }),
+        15);
+
+    bezierPath.addCurve(new BezierCurve(
+        { x: 100, y: 150 },
+        { x: 250, y: 150 },
+        { x: 350, y: 200 },
+        { x: 350, y: 350 }),
+        15);
+ 
+    bezierPath.addCurve(new BezierCurve(
+        { x: 350, y: 350 },
+        { x: 350, y: 575 },
+        { x: 100, y: 575 },
+        { x: 100, y: 350 }),
+        15);
+
+    var path = [];
+    bezierPath.sample(path);
+    this.paths.push(path);
 }
 
-Formation.prototype.add = function(enemy) {
-    this.enemies.push(enemy);
-}
-
-Formation.prototype.update = function(dt, ctx) {
-
-    // Add more enemies if there are very few
-    if (this.enemies.length < 3) {
-        var start = this.enemies.length;
-
-        this.add(new Enemy(
-            this.spritesheet, randInt(0, 4), 100, 50, Math.random()*0.2 + 0.2));
-        this.add(new Enemy(
-            this.spritesheet, randInt(0, 4), 200, 50, Math.random()*0.2 + 0.2));
-        this.add(new Enemy(
-            this.spritesheet, randInt(0, 4), 300, 50, Math.random()*0.2 + 0.2));
-        this.add(new Enemy(
-            this.spritesheet, randInt(0, 4), 400, 50, Math.random()*0.2 + 0.2));
-        this.add(new Enemy(
-            this.spritesheet, randInt(0, 4), 500, 50, Math.random()*0.2 + 0.2));
-
-
-        var i, col, row;
-        for (i = start; i<this.enemies.length; i++) {
-            col = i % 5;
-            row = Math.floor(i / 5);
-            this.enemies[i].formationTarget.x = 100 * col; 
-            this.enemies[i].moveTarget.x = Math.random() * WINDOW_WIDTH; 
-            this.enemies[i].formationTarget.y = 100 * row; 
-            this.enemies[i].moveTarget.y = Math.random() * WINDOW_HEIGHT; 
-        }
-    }
-
+Enemy.prototype.update = function(dt, ctx) {
     switch(this.state) {
+    case this.states.FLY_IN:
+        this.flyIn(dt);
+        break;
+    case this.states.JOIN_FORMATION:
+        this.joinFormation(dt);
+        break;
     case this.states.LATERAL:
         this.lateral(dt);
         break;
-    case this.states.ADVANCE:
-        this.advance(dt);
+    case this.states.SCRAMBLE:
+        this.scramble(dt);
+        break;
+    case this.states.DIVE:
+        this.dive(dt);
+        break;
+    }
+
+    // random chance at firing bullet
+    if (Math.random() < 0.008) {
+        this.fire();
+    }
+
+    // bullets update
+    var i;
+    for (i=0; i<this.bullets.length; i++) {
+        var bullet = this.bullets[i];
+
+        bullet.y += this.bulletSpeed * dt;
+        if (bullet.y > WINDOW_HEIGHT) {
+            this.bullets.splice(i, 1);
+        }
+    }
+}
+
+Enemy.prototype.lateral = function(dt) {
+    this.x += this.speed * dt * this.formation.direction;
+
+    if (this.x + this.w >= WINDOW_WIDTH || this.x <= 0) {
+        this.formation.windowCollision = true;
+    }
+}
+
+Enemy.prototype.joinFormation = function(dt) {
+    if (!this.inFormation) {
+        var dist = subVector(this.formationTarget, {x: this.x, y: this.y});
+        var move = multVector(normVector(dist), this.diveSpeed*dt);
+
+        this.x += move.x; this.y += move.y;
+
+        if (magVector(dist) < 8.0) {
+            this.inFormation = true;
+            console.log(this.x, this.y);
+            console.log(this.formationTarget);
+        }
+
+    } else {
+        switch(this.formation.state) {
+        case this.formation.states.LATERAL:
+            this.state = this.states.LATERAL;
+            break;
+        }
+    }
+
+}
+
+Enemy.prototype.scramble = function(dt) {
+    var dist = distance( { x: this.x, y: this.y },
+                         { x: this.moveTarget.x, y: this.moveTarget.y });
+    if (dist < 10) {
+        this.numMoves++;
+        if (this.numMoves > this.movesPerScramble) {
+            this.moveTarget = this.formationTarget;
+        } else {
+            this.moveTarget = {
+                x: randInt(0, WINDOW_WIDTH),
+                y: randInt(0, WINDOW_HEIGHT)
+            };
+        }
+    }
+
+    dist = distance( { x: this.x, y: this.y },
+        { x: this.formationTarget.x, y: this.formationTarget.y });
+
+    if (dist < 10) {
+        this.inFormation = true;
+    }
+
+    // lerp towards moveTarget
+    var lerpAmount = this.scrambleSpeed * dt / dist;
+    this.x = lerp(this.x, this.moveTarget.x, lerpAmount);
+    this.y = lerp(this.y, this.moveTarget.y, lerpAmount);
+}
+
+Enemy.prototype.dive = function(dt) {
+    console.log('dive');
+}
+
+Enemy.prototype.explode = function(dt) {
+    // Animate
+    if (this.particleSystem) {
+        this.particleSystem.run(dt, ctx);
+
+        if (this.particleSystem.particles.length == 0) {
+            this.particleSystem = null;
+        }
+    }
+}
+
+Enemy.prototype.flyIn = function(dt) {
+    if (this.currentWaypoint < flyInPath.length) {
+        // head towards current waypoint
+        var dist = subVector(flyInPath[this.currentWaypoint], {x: this.x, y: this.y});
+        var move = multVector(normVector(dist), this.diveSpeed*dt);
+
+        this.x += move.x; this.y += move.y;
+
+        if (magVector(dist) < 8.0) {
+            this.currentWaypoint++;
+        }
+
+    } else {
+        this.state = this.states.JOIN_FORMATION;
+    }
+}
+
+// Formation
+// ---------------------------------------------------------------------------
+function Formation() {
+    this.enemies = [];
+    this.direction = 1;
+    this.windowCollision = false;
+    this.states = {
+        "IDLE":     0,
+        "LATERAL":  1,
+        "ADVANCE":  2,
+        "SCRAMBLE": 3,
+        "DIVE":     4
+    };
+    this.state = 0;
+}
+
+Formation.prototype.update = function(dt) {
+    switch(this.state) {
+    case this.states.IDLE:
+        this.idle(dt);
+        break;
+    case this.states.LATERAL:
+        this.lateral(dt);
         break;
     case this.states.SCRAMBLE:
         this.scramble(dt);
         break;
     }
-    
-    // enemy updates regardless of state
-    var i, j;
-    for (i=0; i<this.enemies.length; i++) {
-        var enemy = this.enemies[i];
-        if (enemy.state == enemy.states.EXPLODE) {
-            // spawn a particle system and remove the enemy from the list
-            this.particleSystems.push(
-                new ParticleSystem(enemy.x + enemy.w/2, enemy.y + enemy.h/2));
-            this.enemies.splice(i, 1);
-        }
+}
 
-        // random chance at firing bullet
-        if (Math.random() < 0.008) {
-            enemy.fire();
-        }
-
-        // bullets update
-        for (j=0; j<enemy.bullets.length; j++) {
-            var bullet = enemy.bullets[j];
-
-            bullet.y += enemy.bulletSpeed * dt;
-            if (bullet.y > WINDOW_HEIGHT) {
-                enemy.bullets.splice(i, 1);
-            }
+Formation.prototype.idle = function(dt) {
+    var inFormation = true;
+    for (var i=0; i<this.enemies.length; i++) {
+        if (!this.enemies[i].inFormation) {
+            inFormation = false;
+            break;
         }
     }
-
-    // update & draw all enemy particle systems
-    for (var i = this.particleSystems.length - 1; i >= 0; i--) {
-        var system = this.particleSystems[i];
-
-        system.run(dt, ctx);
-
-        if (system.particles.length == 0) {
-            this.particleSystems.splice(i, 1);
-        }
-    }
-
+   
+    if (inFormation)
+        this.state = this.states.LATERAL;
 }
 
 Formation.prototype.lateral = function(dt) {
-    for (var i=0; i<this.enemies.length; i++) {
-        var enemy = this.enemies[i];
-        if (enemy.state != enemy.states.NORMAL) continue;
-        
-        enemy.x += enemy.speed * dt * this.direction;
+    //var inFormation = true;
+    //for (var i=0; i<this.enemies.length; i++) {
+        //if (!this.enemies[i].inFormation) {
+            //inFormation = false;
+            //break;
+        //}
+    //}
 
-        // change dir when rightmost enemy hits boundary
-        if (enemy.x + enemy.w > WINDOW_WIDTH) {
-            enemy.x = WINDOW_WIDTH - enemy.w;
-            this.direction *= -1;
-            this.state = this.states.ADVANCE;
-        }
-        // change dir when leftmost enemy hits boundary
-        if (enemy.x < 0) {
-            enemy.x = 0
-            this.direction *= -1;
-            this.state = this.states.ADVANCE;
-        }
-    }
+    //if (!inFormation)
+        //this.state = this.states.IDLE;
 
-    // 50% chance of scrambling every timeToMaybeScramble milliseconds
-    this.timeScrambleTry += dt;
-    if (this.timeScrambleTry > this.timeToMaybeScramble) {
-        if (Math.random() < 0.5)
-            this.state = this.states.SCRAMBLE;
-        this.timeScrambleTry = 0;
+    if (Math.random() < 0.001) {
+        this.state = this.states.SCRAMBLE;
     }
-}
-
-Formation.prototype.advance = function(dt) {
-    for (var i=0; i<this.enemies.length; i++) {
-        var enemy = this.enemies[i];
-        if (enemy.state != enemy.states.NORMAL) continue;
-        enemy.y += enemy.h;        
+   
+    // see if enemy sets a window collision in enemy udpate
+    // formation update must be called before enemy updates
+    if (this.windowCollision) {
+       this.direction *= -1;
     }
-    this.state = this.states.LATERAL;
+    this.windowCollision = false;
 }
 
 Formation.prototype.scramble = function(dt) {
-
-    if (!this.scrambled) {
-        for (var i=0; i<this.enemies.length; i++) {
-            var enemy = this.enemies[i];
-            enemy.moveTarget = {
-                x: randInt(0, WINDOW_WIDTH),
-                y: randInt(0, WINDOW_HEIGHT)
-            };
-            enemy.inFormation = false;
-        }
-        this.scrambled = true;
-
-    } else {
-        
-        var inFormation = true;
-        for (var i=0; i<this.enemies.length; i++) {
-            var enemy = this.enemies[i];
-
-            var dist = distance( { x: enemy.x, y: enemy.y }, 
-                                 { x: enemy.moveTarget.x, y: enemy.moveTarget.y });
-            
-            if (!enemy.inFormation) {
-                inFormation = false;
-
-                if (dist < 10) {
-                    enemy.numMoves++;
-                    if (enemy.numMoves > this.movesPerScramble) {
-                        enemy.moveTarget = enemy.formationTarget;
-                    } else {
-                        enemy.moveTarget = {
-                            x: randInt(0, WINDOW_WIDTH),
-                            y: randInt(0, WINDOW_HEIGHT)
-                        };
-                    }
-                }
-
-                dist = distance( { x: enemy.x, y: enemy.y }, 
-                    { x: enemy.formationTarget.x, y: enemy.formationTarget.y });
-
-                if (dist < 10) {
-                    enemy.inFormation = true;
-                }
-
-                // lerp towards moveTarget
-                var lerpAmount = enemy.scrambleSpeed * dt / dist;
-                enemy.x = lerp(enemy.x, enemy.moveTarget.x, lerpAmount);
-                enemy.y = lerp(enemy.y, enemy.moveTarget.y, lerpAmount);
-            }
-        }
-
-        // if all back in formation, exit scramble state
-        if (inFormation) {
-            this.scrambled = false;
-            this.state = this.states.LATERAL;
-        }
-        
-    }
-}
-
-Formation.prototype.draw = function(ctx) {
     for (var i=0; i<this.enemies.length; i++) {
-        this.enemies[i].draw(ctx);
+        this.enemies[i].state = this.enemies[i].states.SCRAMBLE;
+        this.enemies[i].inFormation = false;
     }
+    this.state = this.states.IDLE;
 }
 
 // Starfield
 // ---------------------------------------------------------------------------
 function Starfield() {
     this.moving = true;
-    this.stars = [];
+    this.stars = [];    
     this.maxStars = 200;
     this.colors = [
         '#861111',
@@ -730,7 +880,7 @@ function Starfield() {
         '#46ABB7',
         '#B75C46',
     ];
-    this.speed = 0.15;
+    this.speed = 0.2;
 }
 
 Starfield.prototype.updateAndDraw = function(dt, ctx) {
@@ -781,23 +931,14 @@ function Star(x, y, r, color) {
 function ParticleSystem(x, y) {
     this.origin = { x: x, y: y };
     this.particles = [];
-    this.maxParticles = 500;
-    this.maxLife = 1000;
+    this.maxParticles = 100;
+    this.maxLife = 2000;
     this.lifetime = 0;
 }
 
 ParticleSystem.prototype.run = function(dt, ctx) {
 
     if (this.particles.length < this.maxParticles && this.lifetime < this.maxLife) {
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
-        this.particles.push(new Particle(this.origin.x, this.origin.y));
         this.particles.push(new Particle(this.origin.x, this.origin.y));
     }
 
@@ -827,7 +968,7 @@ ParticleSystem.prototype.run = function(dt, ctx) {
 
 function Particle(x, y) {
     this.acc = { x: 0, y: 0 };
-    this.vel = { x: 1.1*(Math.random()*2 - 1), y: 1.1*(Math.random()*2 - 1) };
+    this.vel = { x: Math.random()*2 - 1, y: Math.random()*2 - 1 };
     this.pos = { x: x, y: y };
     this.lifespan = 255;
     this.color = { r: 255, g: Math.floor(Math.random() * 238), b: 0 };
@@ -836,15 +977,52 @@ function Particle(x, y) {
     this.h = size;
 }
 
-////////
-var startButton = document.getElementById("start");
-var invaders = new Game();
+// Bezier Curve
+// ---------------------------------------------------------------------------
+function BezierCurve(p0, p1, p2, p3) {
+    this.p0 = p0;
+    this.p1 = p1;
+    this.p2 = p2;
+    this.p3 = p3;
+}
 
-startButton.addEventListener("click", function(e) {
-    invaders.run();
-    invaders.music.play();
-    document.getElementById("canvas").style.display = "block";
-    startButton.style.display = "none";
-});
+// calculates a point along a bezier curve
+//
+// converts from normalized window coords (0 - 1)
+// to window coords (0 - width) (0- height)
+BezierCurve.prototype.calculateCurvePoint = function(t) {
+    var tt  = t * t;
+    var ttt = tt * t;
+    var u   = 1.0 - t;
+    var uu  = u * u;
+    var uuu = uu * u;
 
+    var point = { x: 0, y: 0 };
+    point.x = Math.round( (uuu * this.p0.x * WINDOW_WIDTH) +
+        (3 * uu * t * this.p1.x * WINDOW_WIDTH) +
+        (3 * u * tt * this.p2.x * WINDOW_WIDTH) +
+        (ttt * this.p3.x * WINDOW_WIDTH));
+    point.y = Math.round( (uuu * this.p0.y * WINDOW_HEIGHT) +
+        (3 * uu * t * this.p1.y * WINDOW_HEIGHT) +
+        (3 * u * tt * this.p2.y * WINDOW_HEIGHT) +
+        (ttt * this.p3.y * WINDOW_HEIGHT));
+    return point;
+}
 
+function BezierPath() {
+    this.curves = [];
+    this.samples = [];
+}
+   
+BezierPath.prototype.addCurve = function(curve, samples) {
+    this.curves.push(curve);
+    this.samples.push(samples);
+}
+
+BezierPath.prototype.sample = function(sampledPath) {
+for (var i=0; i<this.curves.length; i++) {
+for (var t=0; t <= 0.99; t += (1.0 / this.samples[i])) {
+sampledPath.push(this.curves[i].calculateCurvePoint(t));
+}
+}
+}
